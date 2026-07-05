@@ -1,0 +1,74 @@
+# =============================================================
+# 監視対象ソース定義（人間が編集する。コード変更不要）
+# trust: official / media / community / leak
+# =============================================================
+
+http:
+  user_agent: "pazuu-trend-watcher/1.0 (+https://github.com/bankin0422-hue/trend-watcher)"
+  timeout_sec: 15
+
+rss:
+  - name: "4Gamer"
+    url: "https://www.4gamer.net/rss/index.xml"
+    trust: media
+  - name: "AUTOMATON"
+    url: "https://automaton-media.com/feed/"
+    trust: media
+  - name: "IGN Japan"
+    url: "https://jp.ign.com/feed.xml"
+    trust: media
+  - name: "Game*Spark"
+    url: "https://www.gamespark.jp/rss20/index.rdf"
+    trust: media
+  - name: "IGN"
+    url: "https://feeds.feedburner.com/ign/all"
+    trust: media
+  - name: "PC Gamer"
+    url: "https://www.pcgamer.com/rss/"
+    trust: media
+  - name: "Eurogamer"
+    url: "https://www.eurogamer.net/feed"
+    trust: media
+  # CDPRニュースルーム: 公式RSSはフェーズ1で存在確認済み → 存在しない（2026-07-05確認、
+  # press.cdprojektred.com / cdprojektred.com / cyberpunk.net の候補すべて404）。
+  # 要件§3.1の通りフェーズ2でHTML更新差分監視を実装する。
+  # 当面は Google News クエリ "CD Projekt" が公式発表の報道を拾う。
+
+# Google News検索RSS（キーワード毎に自動生成。lang: ja / en）
+# ここのquery自体が絞り込みなので、辞書に未ヒットでもB級として扱う
+google_news:
+  - query: "Cyberpunk 2077"
+    lang: ja
+  - query: "エッジランナーズ"
+    lang: ja
+  - query: "ウィッチャー4"
+    lang: ja
+  - query: "CD Projekt"
+    lang: ja
+  - query: "Cyberpunk 2077"
+    lang: en
+  - query: "Cyberpunk Edgerunners"
+    lang: en
+  - query: "Witcher 4"
+    lang: en
+
+# Reddit（認証不要のnew.jsonエンドポイント。レート制限厳守）
+reddit:
+  request_interval_sec: 8   # サブレ間の待機（認証なしは10リクエスト/分以下を厳守）
+  limit: 25                 # 1サブレあたりの新着取得数
+  velocity_ref: 50          # upvote速度(票/時)がこの値で拡散補正+1.0
+  spread_cap: 3.0           # 拡散補正の加算上限（補正は最大 1+3.0=4.0倍）
+  velocity_max_age_hours: 6 # 投稿からこの時間以内のみ速度を評価
+  subreddits:
+    - name: "cyberpunkgame"
+      trust: community
+    - name: "LowSodiumCyberpunk"
+      trust: community
+    - name: "Edgerunners"
+      trust: community
+    - name: "witcher"
+      trust: community
+    - name: "Witcher4"
+      trust: community
+    - name: "GamingLeaksAndRumours"
+      trust: leak   # リーク由来 → 通知に必ず「未確認」フラグ

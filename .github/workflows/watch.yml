@@ -1,0 +1,52 @@
+# トレンド速報ウォッチャー: 15分毎に巡回してDiscordへ通知
+#
+# 注意: このリポジトリがprivateで無料枠(月2,000分)が厳しい場合は
+#       cron を "*/20 * * * *" に変更する（要件定義書 §6 参照）。
+name: trend-watch
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # 手動実行（テスト用）
+
+concurrency:
+  group: trend-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # 既読DB(data/watcher.db)をcommitで書き戻すため
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Run watcher
+        env:
+          DISCORD_WEBHOOK_S: ${{ secrets.DISCORD_WEBHOOK_S }}
+          DISCORD_WEBHOOK_DIGEST: ${{ secrets.DISCORD_WEBHOOK_DIGEST }}
+          DISCORD_MENTION: ${{ secrets.DISCORD_MENTION }}
+          # RedditがActionsのIPを403でブロックする場合に備えた無料のOAuth資格情報（任意・推奨）
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+        run: python -m src.main
+
+      - name: Commit state DB
+        run: |
+          git config user.name "trend-watcher-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/watcher.db
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update watcher state [skip ci]"
+            git pull --rebase origin ${GITHUB_REF_NAME} || true
+            git push
+          fi

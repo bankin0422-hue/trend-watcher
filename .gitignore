@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+# data/watcher.db は既読管理のためActionsからcommitする（除外しない）
