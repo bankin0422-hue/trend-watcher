@@ -108,8 +108,9 @@ def main():
     mention = os.environ.get("DISCORD_MENTION", "")
 
     if not dry_run and not webhook_s:
-        log("エラー: DISCORD_WEBHOOK_S が未設定（--dry-run なら送信なしで動作確認可）")
-        sys.exit(1)
+        # Secrets登録前でもActionsを失敗させない（巡回・既読管理は動かし、送信のみ省略）
+        log("警告: DISCORD_WEBHOOK_S が未設定のためdry-runで実行（通知は送信されない）")
+        dry_run = True
 
     keywords_cfg = load_keywords()
     sources_cfg = load_sources()
