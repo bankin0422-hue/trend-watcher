@@ -6,7 +6,9 @@ name: trend-watch
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # */15 だと毎時0/15/30/45分に世界中のジョブが集中しGitHub側で大幅に遅延・スキップされる
+    # （実測で数時間飛ぶことあり）ため、混雑しないオフセット時刻を指定する
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {}   # 手動実行（テスト用）
 
 concurrency:
