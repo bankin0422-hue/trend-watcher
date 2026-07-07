@@ -4,9 +4,9 @@ GitHub Actionsから15分毎に呼ばれる想定。ローカル確認は:
     python -m src.main --dry-run
 
 環境変数:
-    DISCORD_WEBHOOK_S       #速報-s級 のWebhook URL（必須）
-    DISCORD_WEBHOOK_DIGEST  #ダイジェスト のWebhook URL（省略時はS級と同じ先）
-    DISCORD_MENTION         S級通知の先頭に付けるメンション（例: @everyone, <@&ロールID>）
+    SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD  # SMTP設定（必須）
+    MAIL_FROM               送信元アドレス（省略時はSMTP_USER）
+    MAIL_TO                 送信先アドレス（必須）
     DRY_RUN                 "1"で送信せず標準出力へ
 """
 import argparse
@@ -20,7 +20,7 @@ from .config import load_keywords, load_sources, DATA_DIR
 from .fetch_reddit import fetch_subreddits
 from .fetch_rss import fetch_rss_sources
 from .models import JST
-from .notifier import format_digest, format_s_alert, send
+from .notifier import digest_subject, format_digest, format_s_alert, s_alert_subject, send_mail
 from .scorer import score_item, viewer_value_prompt
 from .storage import Storage
 
@@ -45,7 +45,7 @@ def _s_cooldown_active(storage, keyword: str, cooldown_sec: float) -> bool:
     return False
 
 
-def process_items(items, keywords_cfg, reddit_cfg, storage, webhook_s, mention, dry_run):
+def process_items(items, keywords_cfg, reddit_cfg, storage, smtp_cfg, dry_run):
     now_iso = datetime.now(JST).isoformat()
     cooldown_sec = keywords_cfg["scoring"].get("s_cooldown_hours", 6) * 3600
     new_count = s_count = queued = 0
@@ -68,9 +68,7 @@ def process_items(items, keywords_cfg, reddit_cfg, storage, webhook_s, mention, 
         if detection.tier == "S":
             prompt = viewer_value_prompt(item.title, keywords_cfg)
             content = format_s_alert(detection, prompt)
-            if mention:
-                content = f"{mention}\n{content}"
-            notified = send(webhook_s, content, dry_run, log)
+            notified = send_mail(smtp_cfg, s_alert_subject(detection), content, dry_run, log)
             storage.add_history(detection, notified)
             s_count += 1
         else:
@@ -81,7 +79,7 @@ def process_items(items, keywords_cfg, reddit_cfg, storage, webhook_s, mention, 
     log(f"新着{new_count}件 / S級即時通知{s_count}件 / ダイジェスト積み{queued}件")
 
 
-def flush_digests(storage, webhook_digest, dry_run):
+def flush_digests(storage, smtp_cfg, dry_run):
     now = time.time()
     for tier, interval in DIGEST_INTERVALS.items():
         if now - storage.last_flush(tier) < interval:
@@ -91,7 +89,8 @@ def flush_digests(storage, webhook_digest, dry_run):
             storage.set_last_flush(tier, now)
             continue
         content = format_digest(tier, rows, DIGEST_LABELS[tier])
-        if send(webhook_digest, content, dry_run, log):
+        subject = digest_subject(tier, rows, DIGEST_LABELS[tier])
+        if send_mail(smtp_cfg, subject, content, dry_run, log):
             storage.mark_flushed([r[0] for r in rows])
             storage.set_last_flush(tier, now)
             log(f"{tier}級ダイジェスト送信: {len(rows)}件")
@@ -103,13 +102,19 @@ def main():
     args = parser.parse_args()
 
     dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
-    webhook_s = os.environ.get("DISCORD_WEBHOOK_S", "")
-    webhook_digest = os.environ.get("DISCORD_WEBHOOK_DIGEST", "") or webhook_s
-    mention = os.environ.get("DISCORD_MENTION", "")
+    smtp_cfg = {
+        "host": os.environ.get("SMTP_HOST", ""),
+        "port": os.environ.get("SMTP_PORT", "587"),
+        "user": os.environ.get("SMTP_USER", ""),
+        "password": os.environ.get("SMTP_PASSWORD", ""),
+        "mail_from": os.environ.get("MAIL_FROM", ""),
+        "mail_to": os.environ.get("MAIL_TO", ""),
+    }
 
-    if not dry_run and not webhook_s:
+    if not dry_run and not (smtp_cfg["host"] and smtp_cfg["user"] and smtp_cfg["password"]
+                             and smtp_cfg["mail_to"]):
         # Secrets登録前でもActionsを失敗させない（巡回・既読管理は動かし、送信のみ省略）
-        log("警告: DISCORD_WEBHOOK_S が未設定のためdry-runで実行（通知は送信されない）")
+        log("警告: SMTP設定が未完了のためdry-runで実行（通知は送信されない）")
         dry_run = True
 
     keywords_cfg = load_keywords()
@@ -130,9 +135,8 @@ def main():
             storage.set_meta("initialized", "1")
             log(f"初回シード完了: {len(items)}件を既読登録（通知なし）。次回実行から検知開始")
         else:
-            process_items(items, keywords_cfg, reddit_cfg, storage,
-                          webhook_s, mention, dry_run)
-            flush_digests(storage, webhook_digest, dry_run)
+            process_items(items, keywords_cfg, reddit_cfg, storage, smtp_cfg, dry_run)
+            flush_digests(storage, smtp_cfg, dry_run)
         storage.commit()
     finally:
         storage.close()

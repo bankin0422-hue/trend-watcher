@@ -1,4 +1,4 @@
-# トレンド速報ウォッチャー: 15分毎に巡回してDiscordへ通知
+# トレンド速報ウォッチャー: 15分毎に巡回してメールへ通知
 #
 # 注意: このリポジトリがprivateで無料枠(月2,000分)が厳しい場合は
 #       cron を "*/20 * * * *" に変更する（要件定義書 §6 参照）。
@@ -34,9 +34,12 @@ jobs:
 
       - name: Run watcher
         env:
-          DISCORD_WEBHOOK_S: ${{ secrets.DISCORD_WEBHOOK_S }}
-          DISCORD_WEBHOOK_DIGEST: ${{ secrets.DISCORD_WEBHOOK_DIGEST }}
-          DISCORD_MENTION: ${{ secrets.DISCORD_MENTION }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
           # RedditがActionsのIPを403でブロックする場合に備えた無料のOAuth資格情報（任意・推奨）
           REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}

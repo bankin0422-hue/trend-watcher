@@ -1,15 +1,12 @@
-"""Discord Webhook通知
+"""メール通知（SMTP）
 
-- #速報-s級: 即時・メンション付き
-- #ダイジェスト: A級1時間毎まとめ / B級日次まとめ
+- S級: 即時メール
+- A級: 1時間毎まとめメール / B級: 日次まとめメール
 """
-import time
-
-import requests
+import smtplib
+from email.mime.text import MIMEText
 
 from .models import Detection, TRUST_LABELS, JST
-
-DISCORD_CONTENT_LIMIT = 2000
 
 NEXT_ACTION = "次のアクション: 一次ソース確認 → 事実確認後にClaude Proで台本骨子生成"
 
@@ -32,6 +29,11 @@ def format_s_alert(d: Detection, prompt: str) -> str:
     )
 
 
+def s_alert_subject(d: Detection) -> str:
+    flag = "【未確認】" if d.item.unverified else ""
+    return f"[S級速報] {flag}{d.item.title[:80]}"
+
+
 def format_digest(tier: str, rows: list, period_label: str) -> str:
     """rows: (id, title, url, source, trust, score, unverified, detected_at)"""
     header = f"📋 {tier}級ダイジェスト（{period_label}・{len(rows)}件）\n"
@@ -43,44 +45,29 @@ def format_digest(tier: str, rows: list, period_label: str) -> str:
     return header + "\n".join(lines)
 
 
-def _post(webhook_url: str, content: str, timeout: int = 15):
-    resp = requests.post(webhook_url, json={"content": content}, timeout=timeout)
-    if resp.status_code == 429:
-        retry = float(resp.headers.get("Retry-After", 2))
-        time.sleep(min(retry, 10))
-        resp = requests.post(webhook_url, json={"content": content}, timeout=timeout)
-    resp.raise_for_status()
+def digest_subject(tier: str, rows: list, period_label: str) -> str:
+    return f"[{tier}級ダイジェスト] {period_label}・{len(rows)}件"
 
 
-def _chunks(content: str) -> list:
-    """Discordの2000文字制限に合わせ行単位で分割"""
-    if len(content) <= DISCORD_CONTENT_LIMIT:
-        return [content]
-    chunks, buf = [], ""
-    for line in content.split("\n"):
-        line = line[:DISCORD_CONTENT_LIMIT]
-        if len(buf) + len(line) + 1 > DISCORD_CONTENT_LIMIT:
-            chunks.append(buf)
-            buf = line
-        else:
-            buf = line if not buf else f"{buf}\n{line}"
-    if buf:
-        chunks.append(buf)
-    return chunks
-
-
-def send(webhook_url: str, content: str, dry_run: bool, log) -> bool:
-    """通知送信。成功(またはdry-run)でTrue"""
+def send_mail(smtp_cfg: dict, subject: str, body: str, dry_run: bool, log) -> bool:
+    """メール送信。成功(またはdry-run)でTrue"""
     if dry_run:
-        log("--- [DRY RUN] 通知内容 ---\n" + content + "\n--------------------------")
+        log(f"--- [DRY RUN] 件名: {subject} ---\n" + body + "\n--------------------------")
         return True
-    if not webhook_url:
-        log("Webhook URL未設定のため通知スキップ")
+    if not (smtp_cfg.get("host") and smtp_cfg.get("user") and smtp_cfg.get("password")
+            and smtp_cfg.get("mail_to")):
+        log("SMTP設定未完了のため通知スキップ")
         return False
     try:
-        for chunk in _chunks(content):
-            _post(webhook_url, chunk)
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = smtp_cfg.get("mail_from") or smtp_cfg["user"]
+        msg["To"] = smtp_cfg["mail_to"]
+        with smtplib.SMTP(smtp_cfg["host"], int(smtp_cfg.get("port") or 587), timeout=15) as server:
+            server.starttls()
+            server.login(smtp_cfg["user"], smtp_cfg["password"])
+            server.sendmail(msg["From"], [smtp_cfg["mail_to"]], msg.as_string())
         return True
     except Exception as e:
-        log(f"Discord通知失敗: {e}")
+        log(f"メール送信失敗: {e}")
         return False
