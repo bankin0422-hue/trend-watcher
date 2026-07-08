@@ -5,8 +5,7 @@ from src.config import load_keywords
 from src.models import Item
 from src.scorer import match_keyword, score_item
 from src.storage import Storage, normalize_url
-from src.notifier import format_s_alert, format_digest
-from src.scorer import viewer_value_prompt
+from src.notifier import format_daily_digest
 
 kw = load_keywords()
 K = kw["keywords"]
@@ -42,15 +41,12 @@ hot = Item(title="Cyberpunk 2077 crazy discovery", url="https://reddit.com/x",
 d = score_item(hot, kw, {"velocity_ref": 50, "spread_cap": 3.0, "velocity_max_age_hours": 6})
 check(f"B級+急伸(200up/h) -> {d.tier} score={d.score} (expect A)", d.tier == "A")
 
-# --- リークサブレのS級キーワード → 未確認フラグ付きでS通知 ---
+# --- リークサブレのS級キーワード → 未確認フラグ付きでダイジェストのS級欄に入る ---
 leak = Item(title="LEAK: Project Orion map size revealed", url="https://reddit.com/y",
             source="r/GamingLeaksAndRumours", trust="leak", unverified=True)
 d2 = score_item(leak, kw, {})
 check(f"S級×リークサブレ -> {d2.tier} unverified (expect S/未確認)",
       d2.tier == "S" and d2.item.unverified)
-alert = format_s_alert(d2, viewer_value_prompt(d2.item.title, kw))
-check("S級通知に未確認フラグと視聴者価値欄を含む",
-      "未確認" in alert and "視聴者価値の観点" in alert and "次のアクション" in alert)
 
 # --- 既読管理: 同一URL（トラッキングパラメータ差含む）は再通知しない ---
 db = Storage(__import__("pathlib").Path("data") / "test_smoke.db")
@@ -61,14 +57,21 @@ check("同一URLは既読", db.is_seen("https://example.com/news/1"))
 check("normalize_urlでutm除去",
       normalize_url(url) == "https://example.com/news/1")
 
-# --- ダイジェスト整形 ---
+# --- 日次ダイジェスト整形（S級・A級を1通にまとめる） ---
+db.enqueue_digest(d2)
 db.enqueue_digest(d)
-rows = db.pending_digest("A")
-check("A級キューに1件", len(rows) == 1)
-digest = format_digest("A", rows, "1時間毎")
-check("ダイジェスト本文にタイトルとURL", "crazy discovery" in digest and "reddit.com" in digest)
-db.mark_flushed([r[0] for r in rows])
-check("flush後はキュー空", len(db.pending_digest("A")) == 0)
+rows_by_tier = {tier: db.pending_digest(tier) for tier in ("S", "A", "B")}
+check("S級キューに1件", len(rows_by_tier["S"]) == 1)
+check("A級キューに1件", len(rows_by_tier["A"]) == 1)
+digest = format_daily_digest(rows_by_tier, kw, "日次")
+check("ダイジェスト本文にA級タイトルとURLを含む",
+      "crazy discovery" in digest and "reddit.com" in digest)
+check("ダイジェストにS級の未確認フラグと視聴者価値欄・次のアクションを含む",
+      "未確認" in digest and "視聴者価値" in digest and "次のアクション" in digest)
+all_ids = [row[0] for rows in rows_by_tier.values() for row in rows]
+db.mark_flushed(all_ids)
+check("flush後はキュー空",
+      all(len(db.pending_digest(tier)) == 0 for tier in ("S", "A", "B")))
 db.close()
 __import__("os").remove("data/test_smoke.db")
 

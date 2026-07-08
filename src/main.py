@@ -1,6 +1,7 @@
 """トレンド速報ウォッチャー メインエントリ（1サイクル実行してexit）
 
-GitHub Actionsから15分毎に呼ばれる想定。ローカル確認は:
+GitHub Actionsから15分毎に巡回・検知するが、通知メールはS/A/B級すべてまとめて1日1回のみ送信する。
+ローカル確認は:
     python -m src.main --dry-run
 
 環境変数:
@@ -20,12 +21,12 @@ from .config import load_keywords, load_sources, DATA_DIR
 from .fetch_reddit import fetch_subreddits
 from .fetch_rss import fetch_rss_sources
 from .models import JST
-from .notifier import digest_subject, format_digest, format_s_alert, s_alert_subject, send_mail
-from .scorer import score_item, viewer_value_prompt
+from .notifier import daily_digest_subject, format_daily_digest, send_mail
+from .scorer import score_item
 from .storage import Storage
 
-DIGEST_INTERVALS = {"A": 3600, "B": 86400}  # A級: 1時間毎 / B級: 日次
-DIGEST_LABELS = {"A": "1時間毎", "B": "日次"}
+DAILY_INTERVAL_SEC = 86400
+DAILY_LABEL = "日次"
 
 
 def log(msg: str):
@@ -33,8 +34,9 @@ def log(msg: str):
 
 
 def _s_cooldown_active(storage, keyword: str, cooldown_sec: float) -> bool:
-    """同一キーワードのS級即時通知クールダウン。
-    大ニュースは各メディアが一斉に報じるため、初報のみ即時・続報はA級ダイジェストへ。
+    """同一キーワードのS級クールダウン。
+    大ニュースは各メディアが一斉に報じるため、日次ダイジェストのS級欄が同じ話題で
+    埋まらないよう、初報のみS級・続報はA級として積む。
     """
     key = "s_cooldown_" + hashlib.sha1(keyword.encode("utf-8")).hexdigest()[:16]
     last = storage.get_meta(key)
@@ -45,10 +47,10 @@ def _s_cooldown_active(storage, keyword: str, cooldown_sec: float) -> bool:
     return False
 
 
-def process_items(items, keywords_cfg, reddit_cfg, storage, smtp_cfg, dry_run):
+def process_items(items, keywords_cfg, reddit_cfg, storage):
     now_iso = datetime.now(JST).isoformat()
     cooldown_sec = keywords_cfg["scoring"].get("s_cooldown_hours", 6) * 3600
-    new_count = s_count = queued = 0
+    new_count = queued = 0
 
     for item in items:
         if storage.is_seen(item.url):
@@ -65,40 +67,33 @@ def process_items(items, keywords_cfg, reddit_cfg, storage, smtp_cfg, dry_run):
             detection.tier = "A"  # 続報扱いでダイジェストへ降格
             log(f"S級クールダウン中のためA級扱い: {item.title[:60]}")
 
-        if detection.tier == "S":
-            prompt = viewer_value_prompt(item.title, keywords_cfg)
-            content = format_s_alert(detection, prompt)
-            notified = send_mail(smtp_cfg, s_alert_subject(detection), content, dry_run, log)
-            storage.add_history(detection, notified)
-            s_count += 1
-        else:
-            storage.enqueue_digest(detection)
-            storage.add_history(detection, False)
-            queued += 1
+        storage.enqueue_digest(detection)
+        storage.add_history(detection, False)
+        queued += 1
 
-    log(f"新着{new_count}件 / S級即時通知{s_count}件 / ダイジェスト積み{queued}件")
+    log(f"新着{new_count}件 / ダイジェスト積み{queued}件")
 
 
-def flush_digests(storage, smtp_cfg, dry_run):
+def flush_digest(storage, smtp_cfg, keywords_cfg, dry_run):
     now = time.time()
-    for tier, interval in DIGEST_INTERVALS.items():
-        if now - storage.last_flush(tier) < interval:
-            continue
-        rows = storage.pending_digest(tier)
-        if not rows:
-            storage.set_last_flush(tier, now)
-            continue
-        content = format_digest(tier, rows, DIGEST_LABELS[tier])
-        subject = digest_subject(tier, rows, DIGEST_LABELS[tier])
-        if send_mail(smtp_cfg, subject, content, dry_run, log):
-            storage.mark_flushed([r[0] for r in rows])
-            storage.set_last_flush(tier, now)
-            log(f"{tier}級ダイジェスト送信: {len(rows)}件")
+    if now - storage.last_flush("daily") < DAILY_INTERVAL_SEC:
+        return
+    rows_by_tier = {tier: storage.pending_digest(tier) for tier in ("S", "A", "B")}
+    all_ids = [row[0] for rows in rows_by_tier.values() for row in rows]
+    if not all_ids:
+        storage.set_last_flush("daily", now)
+        return
+    content = format_daily_digest(rows_by_tier, keywords_cfg, DAILY_LABEL)
+    subject = daily_digest_subject(rows_by_tier, DAILY_LABEL)
+    if send_mail(smtp_cfg, subject, content, dry_run, log):
+        storage.mark_flushed(all_ids)
+        storage.set_last_flush("daily", now)
+        log(f"日次ダイジェスト送信: 合計{len(all_ids)}件")
 
 
 def main():
     parser = argparse.ArgumentParser(description="トレンド速報ウォッチャー（1サイクル実行）")
-    parser.add_argument("--dry-run", action="store_true", help="Discordへ送信せず標準出力へ")
+    parser.add_argument("--dry-run", action="store_true", help="メール送信せず標準出力へ")
     args = parser.parse_args()
 
     dry_run = args.dry_run or os.environ.get("DRY_RUN") == "1"
@@ -135,8 +130,8 @@ def main():
             storage.set_meta("initialized", "1")
             log(f"初回シード完了: {len(items)}件を既読登録（通知なし）。次回実行から検知開始")
         else:
-            process_items(items, keywords_cfg, reddit_cfg, storage, smtp_cfg, dry_run)
-            flush_digests(storage, smtp_cfg, dry_run)
+            process_items(items, keywords_cfg, reddit_cfg, storage)
+            flush_digest(storage, smtp_cfg, keywords_cfg, dry_run)
         storage.commit()
     finally:
         storage.close()
