@@ -1,6 +1,7 @@
 """トレンド速報ウォッチャー メインエントリ（1サイクル実行してexit）
 
-GitHub Actionsから15分毎に巡回・検知するが、通知メールはS/A/B級すべてまとめて1日1回のみ送信する。
+GitHub Actionsから15分毎に巡回・検知するが、通知メールはS/A/B級すべてまとめて
+毎朝SEND_HOUR_JST時(JST)を過ぎた最初の巡回で1日1回のみ送信する。
 ローカル確認は:
     python -m src.main --dry-run
 
@@ -25,7 +26,7 @@ from .notifier import daily_digest_subject, format_daily_digest, send_mail
 from .scorer import score_item
 from .storage import Storage
 
-DAILY_INTERVAL_SEC = 86400
+SEND_HOUR_JST = 7  # 毎日この時刻(JST)を過ぎた最初の巡回でダイジェストを送信
 DAILY_LABEL = "日次"
 
 
@@ -74,10 +75,22 @@ def process_items(items, keywords_cfg, reddit_cfg, storage):
     log(f"新着{new_count}件 / ダイジェスト積み{queued}件")
 
 
+def _daily_send_due(storage) -> bool:
+    """毎日SEND_HOUR_JST時を過ぎた最初の巡回でTrue（1日1回・時刻固定でドリフトしない）"""
+    now = datetime.now(JST)
+    if now.hour < SEND_HOUR_JST:
+        return False
+    last = storage.get_meta("last_flush_daily")
+    if last is None:
+        return True
+    last_sent = datetime.fromtimestamp(float(last), JST)
+    return last_sent.date() < now.date()  # 今日まだ送っていなければ送信
+
+
 def flush_digest(storage, smtp_cfg, keywords_cfg, dry_run):
-    now = time.time()
-    if now - storage.last_flush("daily") < DAILY_INTERVAL_SEC:
+    if not _daily_send_due(storage):
         return
+    now = time.time()
     rows_by_tier = {tier: storage.pending_digest(tier) for tier in ("S", "A", "B")}
     all_ids = [row[0] for rows in rows_by_tier.values() for row in rows]
     if not all_ids:
