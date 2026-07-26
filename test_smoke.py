@@ -5,7 +5,7 @@ from src.config import load_keywords
 from src.models import Item
 from src.scorer import match_keyword, score_item
 from src.storage import Storage, normalize_url
-from src.notifier import format_daily_digest
+from src.notifier import MAIL_TIERS, dedup_rows, format_daily_digest
 
 kw = load_keywords()
 K = kw["keywords"]
@@ -57,13 +57,33 @@ check("同一URLは既読", db.is_seen("https://example.com/news/1"))
 check("normalize_urlでutm除去",
       normalize_url(url) == "https://example.com/news/1")
 
+# --- B級はメールキューに積まない（履歴のみ） ---
+bee = Item(title="Cyberpunk 2077 GPU benchmark on old card", url="https://example.com/b",
+           source="Google News (Cyberpunk 2077/en)", trust="media", default_tier="B")
+d_b = score_item(bee, kw, {})
+check(f"B級判定 -> {d_b.tier} (expect B)", d_b.tier == "B")
+
+# --- 近似重複の集約（dedup_rows単体） ---
+# 同一ニュースの他媒体転載（末尾の媒体名だけ違う）とサブレ跨ぎ再投稿を1件にまとめる
+row_a1 = (1, "Witcher 3 Songs of the Past Reveal Date Confirmed - IGN",
+          "https://x/1", "IGN", "media", 48.0, 0, "2026-07-21T00:00:00")
+row_a2 = (2, "Witcher 3 Songs of the Past Reveal Date Confirmed - IGN Africa",
+          "https://x/2", "IGN Africa", "media", 48.0, 0, "2026-07-21T00:00:00")
+row_a3 = (3, "Edgerunners 2 gets a release window with new poster",
+          "https://x/3", "r/Edgerunners", "community", 40.0, 0, "2026-07-21T00:00:00")
+deduped_a = dedup_rows([row_a1, row_a2, row_a3])
+check("他媒体転載を集約して2クラスタに", len(deduped_a) == 2)
+check("先頭クラスタの重複件数=2", deduped_a[0][1] == 2)
+check("別ニュースは集約されず単独", deduped_a[1][1] == 1)
+
 # --- 日次ダイジェスト整形（S級・A級を1通にまとめる） ---
-db.enqueue_digest(d2)
-db.enqueue_digest(d)
-rows_by_tier = {tier: db.pending_digest(tier) for tier in ("S", "A", "B")}
+db.enqueue_digest(d2)   # S級1件
+db.enqueue_digest(d)    # A級1件
+rows_by_tier = {tier: db.pending_digest(tier) for tier in MAIL_TIERS}
 check("S級キューに1件", len(rows_by_tier["S"]) == 1)
 check("A級キューに1件", len(rows_by_tier["A"]) == 1)
-digest = format_daily_digest(rows_by_tier, kw, "日次")
+deduped = {tier: dedup_rows(rows) for tier, rows in rows_by_tier.items()}
+digest = format_daily_digest(deduped, kw, "日次")
 check("ダイジェスト本文にA級タイトルとURLを含む",
       "crazy discovery" in digest and "reddit.com" in digest)
 check("ダイジェストにS級の未確認フラグと視聴者価値欄・次のアクションを含む",
@@ -71,7 +91,7 @@ check("ダイジェストにS級の未確認フラグと視聴者価値欄・次
 all_ids = [row[0] for rows in rows_by_tier.values() for row in rows]
 db.mark_flushed(all_ids)
 check("flush後はキュー空",
-      all(len(db.pending_digest(tier)) == 0 for tier in ("S", "A", "B")))
+      all(len(db.pending_digest(tier)) == 0 for tier in MAIL_TIERS))
 db.close()
 __import__("os").remove("data/test_smoke.db")
 

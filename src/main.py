@@ -22,7 +22,8 @@ from .config import load_keywords, load_sources, DATA_DIR
 from .fetch_reddit import fetch_subreddits
 from .fetch_rss import fetch_rss_sources
 from .models import JST
-from .notifier import daily_digest_subject, format_daily_digest, send_mail
+from .notifier import (MAIL_TIERS, daily_digest_subject, dedup_rows,
+                       format_daily_digest, send_mail)
 from .scorer import score_item
 from .storage import Storage
 
@@ -68,11 +69,12 @@ def process_items(items, keywords_cfg, reddit_cfg, storage):
             detection.tier = "A"  # 続報扱いでダイジェストへ降格
             log(f"S級クールダウン中のためA級扱い: {item.title[:60]}")
 
-        storage.enqueue_digest(detection)
-        storage.add_history(detection, False)
-        queued += 1
+        storage.add_history(detection, False)  # 履歴は全級保存（レビュー用）
+        if detection.tier in MAIL_TIERS:       # メール対象(S/A)のみキューへ。B級は履歴のみ
+            storage.enqueue_digest(detection)
+            queued += 1
 
-    log(f"新着{new_count}件 / ダイジェスト積み{queued}件")
+    log(f"新着{new_count}件 / メール対象積み{queued}件")
 
 
 def _daily_send_due(storage) -> bool:
@@ -91,17 +93,20 @@ def flush_digest(storage, smtp_cfg, keywords_cfg, dry_run):
     if not _daily_send_due(storage):
         return
     now = time.time()
-    rows_by_tier = {tier: storage.pending_digest(tier) for tier in ("S", "A", "B")}
+    rows_by_tier = {tier: storage.pending_digest(tier) for tier in MAIL_TIERS}
     all_ids = [row[0] for rows in rows_by_tier.values() for row in rows]
     if not all_ids:
         storage.set_last_flush("daily", now)
         return
-    content = format_daily_digest(rows_by_tier, keywords_cfg, DAILY_LABEL)
-    subject = daily_digest_subject(rows_by_tier, DAILY_LABEL)
+    # 近似重複を集約して表示（マーク対象は元の全idなので次回に持ち越さない）
+    deduped_by_tier = {tier: dedup_rows(rows) for tier, rows in rows_by_tier.items()}
+    content = format_daily_digest(deduped_by_tier, keywords_cfg, DAILY_LABEL)
+    subject = daily_digest_subject(deduped_by_tier, DAILY_LABEL)
     if send_mail(smtp_cfg, subject, content, dry_run, log):
         storage.mark_flushed(all_ids)
         storage.set_last_flush("daily", now)
-        log(f"日次ダイジェスト送信: 合計{len(all_ids)}件")
+        distinct = sum(len(v) for v in deduped_by_tier.values())
+        log(f"日次ダイジェスト送信: {distinct}件（重複集約前 {len(all_ids)}件）")
 
 
 def main():
